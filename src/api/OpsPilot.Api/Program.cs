@@ -16,6 +16,7 @@ builder.Services.AddSwaggerGen();
 
 builder.Services.AddSingleton<TenantAccessService>();
 builder.Services.AddSingleton<ITenantAccessService>(sp => sp.GetRequiredService<TenantAccessService>());
+builder.Services.AddSingleton<ServiceCatalogService>();
 
 var app = builder.Build();
 
