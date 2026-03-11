@@ -5,6 +5,10 @@ namespace OpsPilot.Api.Services;
 
 public class ServiceCatalogService
 {
+    public Service? GetById(Guid id)
+    {
+        return _services.FirstOrDefault(s => s.Id == id);
+    }
     private readonly List<Service> _services = new()
     {
         new Service
