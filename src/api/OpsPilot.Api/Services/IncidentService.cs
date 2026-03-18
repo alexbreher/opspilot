@@ -90,4 +90,11 @@ public class IncidentService
             CreatedAtUtc = incident.CreatedAtUtc
         };
     }
+
+    public bool Exists(Guid incidentId)
+    {
+        return _incidents.Any(i => i.Id == incidentId);
+    }
+
+
 }
