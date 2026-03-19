@@ -9,10 +9,12 @@ namespace OpsPilot.Api.Controllers;
 public class IncidentsController : ControllerBase
 {
     private readonly IncidentService _incidentService;
+    private readonly IIncidentTimeLineStore _timelineStore;
 
-    public IncidentsController(IncidentService incidentService)
+    public IncidentsController(IncidentService incidentService, IIncidentTimeLineStore timelineStore)
     {
         _incidentService = incidentService;
+        _timelineStore = timelineStore;
     }
 
     [HttpGet]
@@ -57,6 +59,38 @@ public class IncidentsController : ControllerBase
             return CreatedAtAction(nameof(GetAll), new {id = created.Id},created);
         }
         catch(InvalidOperationException ex)
+        {
+            return BadRequest(ex.Message);
+        }
+    }
+
+    [HttpPatch("{incidentId:guid}/status")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public IActionResult UpdateStatus(Guid incidentId, [FromBody] UpdateIncidentStatusRequest request)
+    {
+        if (incidentId == Guid.Empty) 
+        {
+            return BadRequest("IncidentId is required");
+        }
+        if (request == null)
+        {
+            return BadRequest("Request body is required");
+        }
+        if (string.IsNullOrWhiteSpace(request.Status))
+        {
+            return BadRequest("Status is required");
+        }
+        if (string.IsNullOrWhiteSpace(request.UpdatedBy))
+        {
+            return BadRequest("Updatedby is required");
+        }
+        try
+        {
+            var updated = _incidentService.UpdateStatus(incidentId, request.Status, request.UpdatedBy, _timelineStore);
+            return Ok(updated);
+        }
+        catch (InvalidOperationException ex)
         {
             return BadRequest(ex.Message);
         }

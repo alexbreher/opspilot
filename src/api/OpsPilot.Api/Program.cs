@@ -19,6 +19,7 @@ builder.Services.AddSingleton<ITenantAccessService>(sp => sp.GetRequiredService<
 builder.Services.AddSingleton<ServiceCatalogService>();
 builder.Services.AddSingleton<IncidentService>();
 builder.Services.AddSingleton<IncidentTimelineService>();
+builder.Services.AddSingleton<IIncidentTimeLineStore, InMemoryIncidentTimeLineStore>();
 
 var app = builder.Build();
 

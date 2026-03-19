@@ -91,10 +91,69 @@ public class IncidentService
         };
     }
 
-    public bool Exists(Guid incidentId)
+    public Incident? GetEntityById(Guid incidentId)
     {
-        return _incidents.Any(i => i.Id == incidentId);
+        return _incidents.FirstOrDefault(i => i.Id == incidentId);
     }
 
+    public bool Exists(Guid incidentId) => _incidents.Any(i => i.Id == incidentId);
 
+    public IncidentDto UpdateStatus( Guid incidentId, string newStatus, string updatedBy, IIncidentTimeLineStore timeLineStore)
+    {
+        var incident = GetEntityById(incidentId);
+
+        if (incident == null)
+        {
+            throw new InvalidOperationException("Incident not found");
+        }
+
+        var allowedStatuses = new[] { "Open", "Investigating", "Mitigated", "Resolved" };
+
+        if (!allowedStatuses.Contains(newStatus, StringComparer.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Status must be one of: Open, Investigating, Mitigated, Resolved");
+        }
+
+        var oldStatus = incident.Status;
+
+        if (string.Equals(oldStatus, newStatus, StringComparison.OrdinalIgnoreCase))
+        {
+            return new IncidentDto
+            {
+                Id = incident.Id,
+                ServiceId = incident.ServiceId,
+                ServiceName = _serviceCatalogService.GetById(incident.ServiceId)?.Name ?? "Unknown Service",
+                Title = incident.Title,
+                Description = incident.Description,
+                Severity = incident.Severity,
+                Status = incident.Status,
+                CreatedAtUtc = incident.CreatedAtUtc
+            };
+        }
+
+        incident.Status = newStatus.Trim();
+
+        //Append timeline event
+        timeLineStore.Add(new Domain.Entities.IncidentTimelineEvent
+        {
+            Id = Guid.NewGuid(),
+            IncidentId = incident.Id,
+            EventType = "StatusChanged",
+            Message = $"Status changed from {oldStatus} to {incident.Status}.",
+            CreatedBy = updatedBy.Trim(),
+            CreatedAtUtc = DateTime.UtcNow
+        });
+
+        return new IncidentDto
+        {
+            Id = incident.Id,
+            ServiceId = incident.ServiceId,
+            ServiceName = _serviceCatalogService.GetById(incident.ServiceId)?.Name ?? "Unknown Service",
+            Title = incident.Title,
+            Description = incident.Description,
+            Severity = incident.Severity,
+            Status = incident.Status,
+            CreatedAtUtc = incident.CreatedAtUtc
+        };
+    }
 }
