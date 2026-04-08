@@ -20,6 +20,7 @@ builder.Services.AddSingleton<ServiceCatalogService>();
 builder.Services.AddSingleton<IncidentService>();
 builder.Services.AddSingleton<IncidentTimelineService>();
 builder.Services.AddSingleton<IIncidentTimeLineStore, InMemoryIncidentTimeLineStore>();
+builder.Services.AddSingleton<PostmortemService>();
 
 var app = builder.Build();
 
