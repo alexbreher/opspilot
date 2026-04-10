@@ -21,6 +21,7 @@ builder.Services.AddSingleton<IncidentService>();
 builder.Services.AddSingleton<IncidentTimelineService>();
 builder.Services.AddSingleton<IIncidentTimeLineStore, InMemoryIncidentTimeLineStore>();
 builder.Services.AddSingleton<PostmortemService>();
+builder.Services.AddSingleton<RunbookService>();
 
 var app = builder.Build();
 
