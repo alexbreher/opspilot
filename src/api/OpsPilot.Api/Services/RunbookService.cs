@@ -35,12 +35,12 @@ public class RunbookService
     };
 
     private readonly ServiceCatalogService _serviceCatalogService;
-    private readonly IIncidentTimeLineStore _timelineStore;
+    private readonly OperationalEventService _operationalEventService;
 
-    public RunbookService(ServiceCatalogService serviceCatalogService, IIncidentTimeLineStore timelineStore)
+    public RunbookService(ServiceCatalogService serviceCatalogService, OperationalEventService operationalEventService)
     {
         _serviceCatalogService = serviceCatalogService;
-        _timelineStore = timelineStore;
+        _operationalEventService = operationalEventService;
     }
 
     public IEnumerable<RunbookDto> GetByServiceId(Guid serviceId)
@@ -103,14 +103,15 @@ public class RunbookService
 
         // Timeline event (service-scoped events will still live on incidents later;
         // for now we write a general operational event against "system").
-        _timelineStore.Add(new IncidentTimelineEvent
+        _operationalEventService.Add(new Domain.Entities.OperationalEvent
         {
             Id = Guid.NewGuid(),
-            IncidentId = Guid.Empty, // placeholder; later we’ll attach to incident when runbook is referenced
+            ServiceId = service.Id,
             EventType = "RunbookCreated",
             Message = $"Runbook created for service '{service.Name}': {runbook.Title}",
             CreatedBy = runbook.CreatedBy,
-            CreatedAtUtc = DateTime.UtcNow
+            CreatedAtUtc = DateTime.UtcNow,
+            CorrelationId = "n/a" // middleware will set correlation for request logs; for now keep simple
         });
 
         return new RunbookDto
