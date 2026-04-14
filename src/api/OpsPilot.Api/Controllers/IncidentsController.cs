@@ -1,6 +1,9 @@
 using Microsoft.AspNetCore.Mvc;
 using OpsPilot.Api.Models;
 using OpsPilot.Api.Services;
+using OpsPilot.Api.Contracts;
+using OpsPilot.Api.Messaging;
+using OpsPilot.Api.Middleware; // for correlation header constant
 
 namespace OpsPilot.Api.Controllers;
 
@@ -10,11 +13,13 @@ public class IncidentsController : ControllerBase
 {
     private readonly IncidentService _incidentService;
     private readonly IIncidentTimeLineStore _timelineStore;
+    private readonly IEventBus _eventBus;
 
-    public IncidentsController(IncidentService incidentService, IIncidentTimeLineStore timelineStore)
+    public IncidentsController(IncidentService incidentService, IIncidentTimeLineStore timelineStore, IEventBus eventBus)
     {
         _incidentService = incidentService;
         _timelineStore = timelineStore;
+        _eventBus = eventBus;
     }
 
     [HttpGet]
@@ -56,6 +61,17 @@ public class IncidentsController : ControllerBase
         try
         {
             var created = _incidentService.Create(request);
+            var correlationId = HttpContext.Response.Headers.TryGetValue(CorrelationIdMiddleware.HeaderName, out var corr) ? corr.ToString() : Guid.NewGuid().ToString("N");
+
+            _eventBus.Publish(new IncidentCreatedEvent(
+                EventId: Guid.NewGuid(),
+                CreatedAtUtc: DateTime.UtcNow,
+                CorrelationId: correlationId,
+                IncidentId: created.Id,
+                ServiceId: created.ServiceId,
+                Title: created.Title,
+                Severity: created.Severity
+            ));
             return CreatedAtAction(nameof(GetAll), new {id = created.Id},created);
         }
         catch(InvalidOperationException ex)
@@ -87,7 +103,22 @@ public class IncidentsController : ControllerBase
         }
         try
         {
+            var incidentEntity = _incidentService.GetEntityById(incidentId);
+            var oldStatus = incidentEntity?.Status ?? "Unknown";
+
             var updated = _incidentService.UpdateStatus(incidentId, request.Status, request.UpdatedBy, _timelineStore);
+
+            var correlationId = HttpContext.Response.Headers.TryGetValue(CorrelationIdMiddleware.HeaderName, out var corr) ? corr.ToString() : Guid.NewGuid().ToString("N");
+
+            _eventBus.Publish(new IncidentStatusChangedEvent(
+                EventId: Guid.NewGuid(),
+                CreatedAtUtc: DateTime.UtcNow,
+                CorrelationId: correlationId,
+                IncidentId: incidentId,
+                OldStatus: oldStatus,
+                NewStatus: updated.Status,
+                UpdatedBy: request.UpdatedBy
+            ));
             return Ok(updated);
         }
         catch (InvalidOperationException ex)

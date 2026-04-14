@@ -4,6 +4,7 @@ using OpsPilot.Api.Middleware;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
 using OpenTelemetry.Resources;
+using OpsPilot.Api.Messaging;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -44,7 +45,8 @@ builder.Services.AddOpenTelemetry()
             .AddHttpClientInstrumentation();
         // NOTE: no ConsoleExporter here, so no repeated console spam
     });
-
+builder.Services.AddSingleton<IEventQueue, InMemoryEventQueue>();
+builder.Services.AddSingleton<IEventBus, InMemoryEventBus>();
 var app = builder.Build();
 
 app.UseMiddleware<CorrelationIdMiddleware>();
