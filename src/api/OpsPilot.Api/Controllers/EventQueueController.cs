@@ -27,4 +27,11 @@ public class EventQueueController : ControllerBase
         }
         return NoContent();
     }
+    [HttpPost("enqueue")]
+    public IActionResult Enqueue([FromBody] object payload)
+    {
+        if (payload == null) return BadRequest("Payload is required.");
+        _queue.Enqueue(payload);
+        return Accepted();
+    }
 }

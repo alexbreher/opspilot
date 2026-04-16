@@ -12,9 +12,6 @@ public class Worker : BackgroundService
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IConfiguration _configuration;
 
-    // basic idempotency: remember processed event ids during this run
-    private readonly HashSet<string> _processed = new(StringComparer.OrdinalIgnoreCase);
-
     public Worker(ILogger<Worker> logger, IHttpClientFactory httpClientFactory, IConfiguration configuration)
     {
         _logger = logger;
@@ -34,7 +31,7 @@ public class Worker : BackgroundService
         {
             try
             {
-                // 1) Dequeue one event from API queue
+                // 1) Dequeue one event
                 var response = await client.PostAsync("/api/internal/event-queue/dequeue", content: null, stoppingToken);
 
                 if (response.StatusCode == System.Net.HttpStatusCode.NoContent)
@@ -48,31 +45,35 @@ public class Worker : BackgroundService
                 var envelope = await response.Content.ReadFromJsonAsync<EventEnvelope>(cancellationToken: stoppingToken);
 
                 if (envelope == null || string.IsNullOrWhiteSpace(envelope.Type) ||
-                    envelope.Payload.ValueKind == JsonValueKind.Undefined ||
-                    envelope.Payload.ValueKind == JsonValueKind.Null)
+                    envelope.Payload.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
                 {
                     await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
                     continue;
                 }
 
-                // 2) Best-effort eventId extraction (handles camelCase/PascalCase)
+                // 2) Extract EventId
                 var eventId =
                     envelope.Payload.TryGetProperty("eventId", out var id1) ? id1.GetString() :
                     envelope.Payload.TryGetProperty("EventId", out var id2) ? id2.GetString() :
                     null;
 
-                if (!string.IsNullOrWhiteSpace(eventId) && _processed.Contains(eventId!))
+                if (string.IsNullOrWhiteSpace(eventId))
                 {
-                    _logger.LogWarning("Duplicate event ignored. EventId={EventId}", eventId);
+                    _logger.LogWarning("Dequeued event has no EventId. Type={Type}", envelope.Type);
                     continue;
                 }
 
-                if (!string.IsNullOrWhiteSpace(eventId))
-                    _processed.Add(eventId!);
+                // 3) Idempotency check (API-side)
+                var alreadyProcessed = await CheckProcessedAsync(client, eventId!, stoppingToken);
+                if (alreadyProcessed)
+                {
+                    _logger.LogWarning("Skipping already processed event. EventId={EventId} Type={Type}", eventId, envelope.Type);
+                    continue;
+                }
 
-                _logger.LogInformation("Processed event Type={Type} EventId={EventId}", envelope.Type, eventId ?? "(none)");
+                _logger.LogInformation("Processing event Type={Type} EventId={EventId}", envelope.Type, eventId);
 
-                // 3) Post an OperationalEvent back to API (observability)
+                // 4) Post operational event (observability)
                 await PostOperationalEventWithRetryAsync(
                     client,
                     new OperationalEventIngestRequest
@@ -86,6 +87,11 @@ public class Worker : BackgroundService
                         ServiceId = ExtractGuid(envelope.Payload, "ServiceId")
                     },
                     stoppingToken);
+
+                // 5) Mark processed (only after successful ingestion)
+                await MarkProcessedAsync(client, eventId!, envelope.Type!, stoppingToken);
+
+                _logger.LogInformation("Marked processed. EventId={EventId}", eventId);
             }
             catch (Exception ex)
             {
@@ -115,6 +121,27 @@ public class Worker : BackgroundService
         return null;
     }
 
+    private async Task<bool> CheckProcessedAsync(HttpClient client, string eventId, CancellationToken ct)
+    {
+        var resp = await client.PostAsJsonAsync("/api/internal/processed-events/check", new { eventId }, ct);
+        resp.EnsureSuccessStatusCode();
+
+        var body = await resp.Content.ReadFromJsonAsync<ProcessedCheckResponse>(cancellationToken: ct);
+        return body?.AlreadyProcessed ?? false;
+    }
+
+    private async Task MarkProcessedAsync(HttpClient client, string eventId, string eventType, CancellationToken ct)
+    {
+        var resp = await client.PostAsJsonAsync("/api/internal/processed-events/mark", new
+        {
+            eventId,
+            eventType,
+            processedAtUtc = DateTime.UtcNow
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+    }
+
     private async Task PostOperationalEventWithRetryAsync(HttpClient client, OperationalEventIngestRequest request, CancellationToken ct)
     {
         const int maxAttempts = 5;
@@ -130,7 +157,6 @@ public class Worker : BackgroundService
                     return;
                 }
 
-                // Non-success status: retry a few times
                 _logger.LogWarning("Failed to ingest operational event. Status={Status}. Attempt {Attempt}/{Max}.",
                     resp.StatusCode, attempt, maxAttempts);
             }
@@ -142,11 +168,11 @@ public class Worker : BackgroundService
             if (attempt < maxAttempts)
             {
                 await Task.Delay(delay, ct);
-                delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 10)); // cap backoff
+                delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 10));
             }
         }
 
-        // Dead-letter: write to disk so it’s not lost
+        // If ingestion fails after retries, dead-letter locally
         await WriteDeadLetterAsync(request, ct);
     }
 
@@ -173,5 +199,11 @@ public class Worker : BackgroundService
     {
         public string? Type { get; set; }
         public JsonElement Payload { get; set; }
+    }
+
+    private sealed class ProcessedCheckResponse
+    {
+        public string EventId { get; set; } = string.Empty;
+        public bool AlreadyProcessed { get; set; }
     }
 }

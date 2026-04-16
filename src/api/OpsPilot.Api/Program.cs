@@ -47,6 +47,9 @@ builder.Services.AddOpenTelemetry()
     });
 builder.Services.AddSingleton<IEventQueue, InMemoryEventQueue>();
 builder.Services.AddSingleton<IEventBus, InMemoryEventBus>();
+builder.Services.AddSingleton<IProcessedEventStore, InMemoryProcessedEventStore>();
+
+
 var app = builder.Build();
 
 app.UseMiddleware<CorrelationIdMiddleware>();
