@@ -53,6 +53,7 @@ builder.Services.AddSingleton<IProcessedEventStore, InMemoryProcessedEventStore>
 var app = builder.Build();
 
 app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseMiddleware<InternalApiKeyMiddleware>();
 
 app.UseHttpLogging();
 

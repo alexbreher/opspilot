@@ -27,6 +27,13 @@ public class Worker : BackgroundService
         var client = _httpClientFactory.CreateClient("OpsPilotApi");
         client.BaseAddress = new Uri(apiBaseUrl);
 
+        var internalKey = _configuration["InternalApiKey"];
+        if (!string.IsNullOrWhiteSpace(internalKey))
+        {
+            client.DefaultRequestHeaders.Remove("X-Internal-Key");
+            client.DefaultRequestHeaders.Add("X-Internal-Key", internalKey);
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
