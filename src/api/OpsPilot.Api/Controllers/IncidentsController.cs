@@ -3,7 +3,8 @@ using OpsPilot.Api.Models;
 using OpsPilot.Api.Services;
 using OpsPilot.Api.Contracts;
 using OpsPilot.Api.Messaging;
-using OpsPilot.Api.Middleware; // for correlation header constant
+using OpsPilot.Api.Middleware;
+using System.Text.Json; // for correlation header constant
 
 namespace OpsPilot.Api.Controllers;
 
@@ -14,12 +15,14 @@ public class IncidentsController : ControllerBase
     private readonly IncidentService _incidentService;
     private readonly IIncidentTimeLineStore _timelineStore;
     private readonly IEventBus _eventBus;
+    private readonly IEventQueueV2 _queueV2;
 
-    public IncidentsController(IncidentService incidentService, IIncidentTimeLineStore timelineStore, IEventBus eventBus)
+    public IncidentsController(IncidentService incidentService, IIncidentTimeLineStore timelineStore, IEventBus eventBus, IEventQueueV2 queueV2)
     {
         _incidentService = incidentService;
         _timelineStore = timelineStore;
         _eventBus = eventBus;
+        _queueV2 = queueV2;
     }
 
     [HttpGet]
@@ -72,6 +75,25 @@ public class IncidentsController : ControllerBase
                 Title: created.Title,
                 Severity: created.Severity
             ));
+
+            var payloadJson = JsonSerializer.SerializeToElement(new
+            {
+                eventId = Guid.NewGuid().ToString(),
+                createdAtUtc = DateTime.UtcNow,
+                correlationId,
+                incidentId = created.Id,
+                serviceId = created.ServiceId,
+                title = created.Title,
+                severity = created.Severity
+            });
+
+            _queueV2.Enqueue(new EventEnvelopeV2
+            {
+                Type = "OpsPilot.Api.Contracts.IncidentCreatedEvent",
+                EventId = payloadJson.GetProperty("eventId").GetString()!,
+                Payload = payloadJson
+            });
+
             return CreatedAtAction(nameof(GetAll), new {id = created.Id},created);
         }
         catch(InvalidOperationException ex)

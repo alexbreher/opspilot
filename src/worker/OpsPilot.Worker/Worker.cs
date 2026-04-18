@@ -22,11 +22,18 @@ public class Worker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var apiBaseUrl = _configuration["ApiBaseUrl"] ?? "http://localhost:5033";
-        _logger.LogInformation("OpsPilot.Worker started. Polling {ApiBaseUrl}", apiBaseUrl);
+
+        // ? THIS is where useV2/dequeuePath belongs (right at startup)
+        var useV2 = bool.TryParse(_configuration["UseQueueV2"], out var b) && b;
+        var dequeuePath = useV2 ? "/api/internal/event-queue/v2/dequeue" : "/api/internal/event-queue/dequeue";
+
+        _logger.LogInformation("OpsPilot.Worker started. Polling {ApiBaseUrl} (UseQueueV2={UseQueueV2})",
+            apiBaseUrl, useV2);
 
         var client = _httpClientFactory.CreateClient("OpsPilotApi");
         client.BaseAddress = new Uri(apiBaseUrl);
 
+        // Internal API key header (optional)
         var internalKey = _configuration["InternalApiKey"];
         if (!string.IsNullOrWhiteSpace(internalKey))
         {
@@ -38,8 +45,8 @@ public class Worker : BackgroundService
         {
             try
             {
-                // 1) Dequeue one event
-                var response = await client.PostAsync("/api/internal/event-queue/dequeue", content: null, stoppingToken);
+                // ? Dequeue from the selected path
+                var response = await client.PostAsync(dequeuePath, content: null, stoppingToken);
 
                 if (response.StatusCode == System.Net.HttpStatusCode.NoContent)
                 {
@@ -49,54 +56,85 @@ public class Worker : BackgroundService
 
                 response.EnsureSuccessStatusCode();
 
-                var envelope = await response.Content.ReadFromJsonAsync<EventEnvelope>(cancellationToken: stoppingToken);
+                string? eventType;
+                string? eventId;
+                JsonElement payload;
 
-                if (envelope == null || string.IsNullOrWhiteSpace(envelope.Type) ||
-                    envelope.Payload.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+                if (useV2)
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
-                    continue;
+                    // ? V2 envelope includes EventId explicitly
+                    var env = await response.Content.ReadFromJsonAsync<EventEnvelopeV2>(cancellationToken: stoppingToken);
+
+                    if (env == null || string.IsNullOrWhiteSpace(env.Type) || string.IsNullOrWhiteSpace(env.EventId) ||
+                        env.Payload.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+                    {
+                        _logger.LogWarning("Invalid v2 envelope dequeued.");
+                        await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+                        continue;
+                    }
+
+                    eventType = env.Type;
+                    eventId = env.EventId;
+                    payload = env.Payload;
+                }
+                else
+                {
+                    // ? V1 envelope returned { type, payload } where payload may or may not contain eventId
+                    var env = await response.Content.ReadFromJsonAsync<EventEnvelopeV1>(cancellationToken: stoppingToken);
+
+                    if (env == null || string.IsNullOrWhiteSpace(env.Type) ||
+                        env.Payload.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+                    {
+                        _logger.LogWarning("Invalid v1 envelope dequeued.");
+                        await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+                        continue;
+                    }
+
+                    eventType = env.Type;
+                    payload = env.Payload;
+
+                    // best-effort extraction (camelCase/PascalCase)
+                    eventId =
+                        payload.TryGetProperty("eventId", out var id1) ? id1.GetString() :
+                        payload.TryGetProperty("EventId", out var id2) ? id2.GetString() :
+                        null;
+
+                    if (string.IsNullOrWhiteSpace(eventId))
+                    {
+                        _logger.LogWarning("Dequeued event has no EventId. Type={Type}", eventType);
+                        // With v1, we cannot guarantee idempotency. Skip.
+                        await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+                        continue;
+                    }
                 }
 
-                // 2) Extract EventId
-                var eventId =
-                    envelope.Payload.TryGetProperty("eventId", out var id1) ? id1.GetString() :
-                    envelope.Payload.TryGetProperty("EventId", out var id2) ? id2.GetString() :
-                    null;
-
-                if (string.IsNullOrWhiteSpace(eventId))
-                {
-                    _logger.LogWarning("Dequeued event has no EventId. Type={Type}", envelope.Type);
-                    continue;
-                }
-
-                // 3) Idempotency check (API-side)
+                // 1) Check already processed (API store)
                 var alreadyProcessed = await CheckProcessedAsync(client, eventId!, stoppingToken);
                 if (alreadyProcessed)
                 {
-                    _logger.LogWarning("Skipping already processed event. EventId={EventId} Type={Type}", eventId, envelope.Type);
+                    _logger.LogWarning("Skipping already processed event. EventId={EventId} Type={Type}", eventId, eventType);
                     continue;
                 }
 
-                _logger.LogInformation("Processing event Type={Type} EventId={EventId}", envelope.Type, eventId);
+                _logger.LogInformation("Processing event Type={Type} EventId={EventId}", eventType, eventId);
 
-                // 4) Post operational event (observability)
+                // 2) Post operational event back (observability)
                 await PostOperationalEventWithRetryAsync(
                     client,
                     new OperationalEventIngestRequest
                     {
                         EventType = "EventProcessed",
-                        Message = $"Worker processed {envelope.Type}",
+                        Message = $"Worker processed {eventType}",
                         CreatedBy = "opspilot-worker",
-                        CorrelationId = ExtractCorrelationId(envelope.Payload),
+                        CorrelationId = ExtractCorrelationId(payload),
                         SourceEventId = eventId,
-                        IncidentId = ExtractGuid(envelope.Payload, "IncidentId"),
-                        ServiceId = ExtractGuid(envelope.Payload, "ServiceId")
+                        IncidentId = ExtractGuid(payload, "IncidentId"),
+                        ServiceId = ExtractGuid(payload, "ServiceId")
                     },
                     stoppingToken);
 
-                // 5) Mark processed (only after successful ingestion)
-                await MarkProcessedAsync(client, eventId!, envelope.Type!, stoppingToken);
+                // 3) Mark processed
+                await MarkProcessedAsync(client, eventId!, eventType!, stoppingToken);
 
                 _logger.LogInformation("Marked processed. EventId={EventId}", eventId);
             }
@@ -160,9 +198,7 @@ public class Worker : BackgroundService
             {
                 var resp = await client.PostAsJsonAsync("/api/internal/operational-events", request, ct);
                 if (resp.IsSuccessStatusCode)
-                {
                     return;
-                }
 
                 _logger.LogWarning("Failed to ingest operational event. Status={Status}. Attempt {Attempt}/{Max}.",
                     resp.StatusCode, attempt, maxAttempts);
@@ -179,32 +215,22 @@ public class Worker : BackgroundService
             }
         }
 
-        // If ingestion fails after retries, dead-letter locally
-        await WriteDeadLetterAsync(request, ct);
+        _logger.LogError("Operational event ingestion failed after retries. SourceEventId={SourceEventId}", request.SourceEventId);
     }
 
-    private async Task WriteDeadLetterAsync(OperationalEventIngestRequest request, CancellationToken ct)
-    {
-        try
-        {
-            var dir = Path.Combine(AppContext.BaseDirectory, "deadletters");
-            Directory.CreateDirectory(dir);
-
-            var file = Path.Combine(dir, $"op-event-deadletter-{DateTime.UtcNow:yyyyMMddHHmmssfff}.json");
-            var json = JsonSerializer.Serialize(request, new JsonSerializerOptions { WriteIndented = true });
-
-            await File.WriteAllTextAsync(file, json, ct);
-            _logger.LogError("Operational event dead-lettered to {File}", file);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to write dead-letter file");
-        }
-    }
-
-    private sealed class EventEnvelope
+    // V1 response envelope from /api/internal/event-queue/dequeue
+    private sealed class EventEnvelopeV1
     {
         public string? Type { get; set; }
+        public JsonElement Payload { get; set; }
+    }
+
+    // ? V2 envelope from /api/internal/event-queue/v2/dequeue
+    // This is the class you asked about: it only exists to deserialize v2 responses.
+    private sealed class EventEnvelopeV2
+    {
+        public string? Type { get; set; }
+        public string? EventId { get; set; }
         public JsonElement Payload { get; set; }
     }
 

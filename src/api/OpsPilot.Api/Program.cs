@@ -48,7 +48,7 @@ builder.Services.AddOpenTelemetry()
 builder.Services.AddSingleton<IEventQueue, InMemoryEventQueue>();
 builder.Services.AddSingleton<IEventBus, InMemoryEventBus>();
 builder.Services.AddSingleton<IProcessedEventStore, InMemoryProcessedEventStore>();
-
+builder.Services.AddSingleton<IEventQueueV2, InMemoryEventQueueV2>();
 
 var app = builder.Build();
 
