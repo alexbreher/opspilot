@@ -1,9 +1,11 @@
 using Microsoft.AspNetCore.Mvc;
 using OpsPilot.Api.Models;
+using OpsPilot.Api.Security;
 using OpsPilot.Api.Services;
 
 namespace OpsPilot.Api.Controllers;
 
+[DevelopmentOnly]
 [ApiController]
 [Route("api/internal/processed-events")]
 public class InternalProcessedEventsController : ControllerBase

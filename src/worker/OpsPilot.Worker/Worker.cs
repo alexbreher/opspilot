@@ -1,4 +1,4 @@
-using System.Net.Http.Json;
+﻿using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
@@ -12,6 +12,9 @@ public class Worker : BackgroundService
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IConfiguration _configuration;
 
+    // ✅ Day 17: heartbeat tracker
+    private DateTime _lastHeartbeatUtc = DateTime.MinValue;
+
     public Worker(ILogger<Worker> logger, IHttpClientFactory httpClientFactory, IConfiguration configuration)
     {
         _logger = logger;
@@ -23,7 +26,6 @@ public class Worker : BackgroundService
     {
         var apiBaseUrl = _configuration["ApiBaseUrl"] ?? "http://localhost:5033";
 
-        // ? THIS is where useV2/dequeuePath belongs (right at startup)
         var useV2 = bool.TryParse(_configuration["UseQueueV2"], out var b) && b;
         var dequeuePath = useV2 ? "/api/internal/event-queue/v2/dequeue" : "/api/internal/event-queue/dequeue";
 
@@ -45,7 +47,24 @@ public class Worker : BackgroundService
         {
             try
             {
-                // ? Dequeue from the selected path
+                // ✅ Day 17: heartbeat once per 60 seconds (near top of loop)
+                if (DateTime.UtcNow - _lastHeartbeatUtc > TimeSpan.FromSeconds(60))
+                {
+                    await PostOperationalEventWithRetryAsync(
+                        client,
+                        new OperationalEventIngestRequest
+                        {
+                            EventType = "WorkerHeartbeat",
+                            Message = "Worker is alive and polling.",
+                            CreatedBy = "opspilot-worker",
+                            CorrelationId = "heartbeat"
+                        },
+                        stoppingToken);
+
+                    _lastHeartbeatUtc = DateTime.UtcNow;
+                }
+
+                // Dequeue from selected path
                 var response = await client.PostAsync(dequeuePath, content: null, stoppingToken);
 
                 if (response.StatusCode == System.Net.HttpStatusCode.NoContent)
@@ -62,7 +81,6 @@ public class Worker : BackgroundService
 
                 if (useV2)
                 {
-                    // ? V2 envelope includes EventId explicitly
                     var env = await response.Content.ReadFromJsonAsync<EventEnvelopeV2>(cancellationToken: stoppingToken);
 
                     if (env == null || string.IsNullOrWhiteSpace(env.Type) || string.IsNullOrWhiteSpace(env.EventId) ||
@@ -79,7 +97,6 @@ public class Worker : BackgroundService
                 }
                 else
                 {
-                    // ? V1 envelope returned { type, payload } where payload may or may not contain eventId
                     var env = await response.Content.ReadFromJsonAsync<EventEnvelopeV1>(cancellationToken: stoppingToken);
 
                     if (env == null || string.IsNullOrWhiteSpace(env.Type) ||
@@ -93,7 +110,6 @@ public class Worker : BackgroundService
                     eventType = env.Type;
                     payload = env.Payload;
 
-                    // best-effort extraction (camelCase/PascalCase)
                     eventId =
                         payload.TryGetProperty("eventId", out var id1) ? id1.GetString() :
                         payload.TryGetProperty("EventId", out var id2) ? id2.GetString() :
@@ -102,23 +118,22 @@ public class Worker : BackgroundService
                     if (string.IsNullOrWhiteSpace(eventId))
                     {
                         _logger.LogWarning("Dequeued event has no EventId. Type={Type}", eventType);
-                        // With v1, we cannot guarantee idempotency. Skip.
                         await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
                         continue;
                     }
                 }
 
-                // 1) Check already processed (API store)
+                // Idempotency check
                 var alreadyProcessed = await CheckProcessedAsync(client, eventId!, stoppingToken);
                 if (alreadyProcessed)
                 {
-                    _logger.LogWarning("Skipping already processed event. EventId={EventId} Type={Type}", eventId, eventType);
+                    _logger.LogInformation("Skipping already processed event. EventId={EventId} Type={Type}", eventId, eventType);
                     continue;
                 }
 
                 _logger.LogInformation("Processing event Type={Type} EventId={EventId}", eventType, eventId);
 
-                // 2) Post operational event back (observability)
+                // Post operational event back (observability)
                 await PostOperationalEventWithRetryAsync(
                     client,
                     new OperationalEventIngestRequest
@@ -133,7 +148,7 @@ public class Worker : BackgroundService
                     },
                     stoppingToken);
 
-                // 3) Mark processed
+                // Mark processed
                 await MarkProcessedAsync(client, eventId!, eventType!, stoppingToken);
 
                 _logger.LogInformation("Marked processed. EventId={EventId}", eventId);
@@ -218,15 +233,12 @@ public class Worker : BackgroundService
         _logger.LogError("Operational event ingestion failed after retries. SourceEventId={SourceEventId}", request.SourceEventId);
     }
 
-    // V1 response envelope from /api/internal/event-queue/dequeue
     private sealed class EventEnvelopeV1
     {
         public string? Type { get; set; }
         public JsonElement Payload { get; set; }
     }
 
-    // ? V2 envelope from /api/internal/event-queue/v2/dequeue
-    // This is the class you asked about: it only exists to deserialize v2 responses.
     private sealed class EventEnvelopeV2
     {
         public string? Type { get; set; }

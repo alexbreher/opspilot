@@ -1,9 +1,11 @@
 using Microsoft.AspNetCore.Mvc;
 using OpsPilot.Api.Messaging;
+using OpsPilot.Api.Security;
 using System.Text.Json;
 
 namespace OpsPilot.Api.Controllers;
 
+[DevelopmentOnly]
 [ApiController]
 [Route("api/internal/event-queue")]
 public class EventQueueController : ControllerBase

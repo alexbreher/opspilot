@@ -2,10 +2,12 @@ using Microsoft.AspNetCore.Mvc;
 using OpenTelemetry.Trace;
 using OpsPilot.Api.Domain.Entities;
 using OpsPilot.Api.Models;
+using OpsPilot.Api.Security;
 using OpsPilot.Api.Services;
 
 namespace OpsPilot.Api.Controllers;
 
+[DevelopmentOnly]
 [ApiController]
 [Route("api/internal/operational-events")]
 public class InternalOperationalEventsController : ControllerBase
