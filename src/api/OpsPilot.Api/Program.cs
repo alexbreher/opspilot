@@ -5,6 +5,7 @@ using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
 using OpenTelemetry.Resources;
 using OpsPilot.Api.Messaging;
+using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -17,7 +18,31 @@ builder.Services.AddHealthChecks();
 //Controllers = Swagger
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.AddSecurityDefinition("InternalApiKey", new OpenApiSecurityScheme
+    {
+        Description = "Internal API Key (X-Internal-Key). Required for /api/internal/* endpoints.",
+        Name = "X-Internal-Key",
+        In = ParameterLocation.Header,
+        Type = SecuritySchemeType.ApiKey
+    });
+
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "InternalApiKey"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
 
 builder.Services.AddSingleton<TenantAccessService>();
 builder.Services.AddSingleton<ITenantAccessService>(sp => sp.GetRequiredService<TenantAccessService>());
@@ -49,6 +74,8 @@ builder.Services.AddSingleton<IEventQueue, InMemoryEventQueue>();
 builder.Services.AddSingleton<IEventBus, InMemoryEventBus>();
 builder.Services.AddSingleton<IProcessedEventStore, InMemoryProcessedEventStore>();
 builder.Services.AddSingleton<IEventQueueV2, InMemoryEventQueueV2>();
+builder.Services.AddSingleton<IBackgroundEventQueue, ChannelBackgroundEventQueue>();
+builder.Services.AddHostedService<ApiEventProcessorHostedService>();
 
 var app = builder.Build();
 
