@@ -6,8 +6,11 @@ using OpenTelemetry.Trace;
 using OpenTelemetry.Resources;
 using OpsPilot.Api.Messaging;
 using Microsoft.OpenApi.Models;
+using static OpsPilot.Api.Services.IMessageBusPublisher;
 
 var builder = WebApplication.CreateBuilder(args);
+
+Console.WriteLine($"Transport={builder.Configuration["MessageBus:Transport"]}, RabbitHost={builder.Configuration["MessageBus:RabbitMq:Host"]}");
 
 //Structured logging is provided by default
 builder.Services.AddHttpLogging(_ => { });
@@ -76,6 +79,7 @@ builder.Services.AddSingleton<IProcessedEventStore, InMemoryProcessedEventStore>
 builder.Services.AddSingleton<IEventQueueV2, InMemoryEventQueueV2>();
 builder.Services.AddSingleton<IBackgroundEventQueue, ChannelBackgroundEventQueue>();
 builder.Services.AddHostedService<ApiEventProcessorHostedService>();
+builder.Services.AddSingleton<IMessageBusPublisher, RabbitMqMessageBusPublisher>();
 
 var app = builder.Build();
 

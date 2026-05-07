@@ -4,6 +4,7 @@ var builder = Host.CreateApplicationBuilder(args);
 
 builder.Services.AddHttpClient("OpsPilotApi");
 builder.Services.AddHostedService<Worker>();
+builder.Services.AddHostedService<RabbitMqConsumerHostedService>();
 
-var host = builder.Build();
-host.Run();
+var hostApp = builder.Build();
+hostApp.Run();
