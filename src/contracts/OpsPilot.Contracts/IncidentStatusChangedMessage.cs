@@ -1,7 +1,9 @@
-namespace OpsPilot.Api.Contracts;
+using System;
 
-public record IncidentStatusChangedEvent(
-    Guid EventId,
+namespace OpsPilot.Contracts;
+
+public record IncidentStatusChangedMessage(
+    string EventId,
     DateTime CreatedAtUtc,
     string CorrelationId,
     Guid IncidentId,

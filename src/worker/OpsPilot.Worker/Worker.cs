@@ -73,6 +73,13 @@ public class Worker : BackgroundService
                     continue;
                 }
 
+                if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+                {
+                    _logger.LogError("Unauthorized calling API internal endpoints. Check InternalApiKey. Backing off.");
+                    await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                    continue;
+                }
+
                 response.EnsureSuccessStatusCode();
 
                 string? eventType;

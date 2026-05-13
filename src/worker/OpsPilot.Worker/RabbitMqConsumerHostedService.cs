@@ -5,7 +5,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
-using OpsPilot.Api.Contracts;
+using OpsPilot.Contracts;
 
 namespace OpsPilot.Worker;
 
@@ -17,6 +17,7 @@ public class RabbitMqConsumerHostedService : BackgroundService
 
     private IConnection? _connection;
     private IModel? _channel;
+    private const int MaxRetries = 5;
 
     public RabbitMqConsumerHostedService(
         ILogger<RabbitMqConsumerHostedService> logger,
@@ -54,8 +55,8 @@ public class RabbitMqConsumerHostedService : BackgroundService
         DeclareQueue(opt.QueueIncidentStatusChanged);
 
         _channel.BasicQos(0, 1, false);
-        ConsumeQueue<OpsPilot.Api.Contracts.IncidentCreatedMessage>(api, opt.QueueIncidentCreated, HandleIncidentCreatedAsync, stoppingToken);
-        ConsumeQueue<OpsPilot.Api.Contracts.IncidentStatusChangedMessage>(api, opt.QueueIncidentStatusChanged, HandleIncidentStatusChangedAsync, stoppingToken);
+        ConsumeQueue<OpsPilot.Contracts.IncidentCreatedMessage>(api, opt.QueueIncidentCreated, HandleIncidentCreatedAsync, stoppingToken);
+        ConsumeQueue<OpsPilot.Contracts.IncidentStatusChangedMessage>(api, opt.QueueIncidentStatusChanged, HandleIncidentStatusChangedAsync, stoppingToken);
 
         _logger.LogInformation("RabbitMq consumer running.");
         await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken);
@@ -90,7 +91,55 @@ public class RabbitMqConsumerHostedService : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "RabbitMq processing failed for {Queue}. Requeueing.", queueName);
-                _channel!.BasicNack(ea.DeliveryTag, false, true);
+                var retryCount = GetRetryCount(ea.BasicProperties);
+                retryCount++;
+
+                if (retryCount <= MaxRetries)
+                {
+                    _logger.LogWarning("Processing failed. Requeueing. Queue={Queue} Retry={Retry}/{Max}",
+                        queueName, retryCount, MaxRetries);
+
+                    // republish with incremented retry header
+                    var props = _channel!.CreateBasicProperties();
+                    props.DeliveryMode = ea.BasicProperties?.DeliveryMode ?? 2;
+                    props.MessageId = ea.BasicProperties?.MessageId;
+                    props.CorrelationId = ea.BasicProperties?.CorrelationId;
+                    props.ContentType = ea.BasicProperties?.ContentType ?? "application/json";
+                    props.Headers = ea.BasicProperties?.Headers != null
+                        ? new Dictionary<string, object>(ea.BasicProperties.Headers)
+                        : new Dictionary<string, object>();
+
+                    SetRetryCount(props, retryCount);
+
+                    _channel.BasicPublish(exchange: "", routingKey: queueName, basicProperties: props, body: ea.Body);
+
+                    // ACK the original (we republished it ourselves)
+                    _channel.BasicAck(ea.DeliveryTag, false);
+                }
+                else
+                {
+                    var dlq = $"{queueName}.dlq";
+                    _logger.LogError("Max retries exceeded. Dead-lettering. Queue={Queue} DLQ={DLQ} MessageId={MessageId}",
+                        queueName, dlq, ea.BasicProperties?.MessageId);
+
+                    _channel!.QueueDeclare(queue: dlq, durable: true, exclusive: false, autoDelete: false, arguments: null);
+
+                    var props = _channel.CreateBasicProperties();
+                    props.DeliveryMode = ea.BasicProperties?.DeliveryMode ?? 2;
+                    props.MessageId = ea.BasicProperties?.MessageId;
+                    props.CorrelationId = ea.BasicProperties?.CorrelationId;
+                    props.ContentType = ea.BasicProperties?.ContentType ?? "application/json";
+                    props.Headers = ea.BasicProperties?.Headers != null
+                        ? new Dictionary<string, object>(ea.BasicProperties.Headers)
+                        : new Dictionary<string, object>();
+
+                    SetRetryCount(props, retryCount);
+
+                    _channel.BasicPublish(exchange: "", routingKey: dlq, basicProperties: props, body: ea.Body);
+
+                    // ACK original (we moved it)
+                    _channel.BasicAck(ea.DeliveryTag, false);
+                }
             }
         };
 
@@ -204,5 +253,30 @@ public class RabbitMqConsumerHostedService : BackgroundService
         try { _channel?.Dispose(); } catch { }
         try { _connection?.Dispose(); } catch { }
         base.Dispose();
+    }
+
+    private static int GetRetryCount(IBasicProperties props)
+    {
+        if (props?.Headers == null) return 0;
+        if (props.Headers.TryGetValue("x-retry-count", out var val) && val != null)
+        {
+            try
+            {
+                if (val is byte[] bytes)
+                {
+                    var s = Encoding.UTF8.GetString(bytes);
+                    if (int.TryParse(s, out var n)) return n;
+                }
+                if (val is int i) return i;
+            }
+            catch { }
+        }
+        return 0;
+    }
+
+    private static void SetRetryCount(IBasicProperties props, int retryCount)
+    {
+        props.Headers ??= new Dictionary<string, object>();
+        props.Headers["x-retry-count"] = Encoding.UTF8.GetBytes(retryCount.ToString());
     }
 }

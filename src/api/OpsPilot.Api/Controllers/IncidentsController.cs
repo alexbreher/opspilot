@@ -1,7 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using OpsPilot.Api.Models;
 using OpsPilot.Api.Services;
-using OpsPilot.Api.Contracts;
+using OpsPilot.Contracts;
 using OpsPilot.Api.Messaging;
 using OpsPilot.Api.Middleware;
 using System.Text.Json;
@@ -80,7 +80,7 @@ public class IncidentsController : ControllerBase
             // Day 18: in-proc processor
             await _bgQueue.EnqueueAsync(new EventEnvelopeV2
             {
-                Type = "OpsPilot.Api.Contracts.IncidentCreatedEvent",
+                Type = "OpsPilot.Contracts.IncidentCreatedEvent",
                 EventId = payload.GetProperty("eventId").GetString()!,
                 Payload = payload
             });
@@ -141,7 +141,7 @@ public class IncidentsController : ControllerBase
             // Day 18: in-proc processor
             await _bgQueue.EnqueueAsync(new EventEnvelopeV2
             {
-                Type = "OpsPilot.Api.Contracts.IncidentStatusChangedEvent",
+                Type = "OpsPilot.Contracts.IncidentStatusChangedEvent",
                 EventId = payload.GetProperty("eventId").GetString()!,
                 Payload = payload
             });

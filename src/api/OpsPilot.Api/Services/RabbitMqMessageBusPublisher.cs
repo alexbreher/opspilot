@@ -1,6 +1,6 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
-using OpsPilot.Api.Contracts;
+using OpsPilot.Contracts;
 using RabbitMQ.Client;
 
 namespace OpsPilot.Api.Services;
@@ -17,22 +17,22 @@ public class RabbitMqMessageBusPublisher : IMessageBusPublisher
     public Task PublishIncidentCreatedAsync(IncidentCreatedMessage msg, CancellationToken ct)
     {
         if (!UseRabbitMq()) return Task.CompletedTask;
-        Publish(ToOptions().QueueIncidentCreated, msg);
+        Publish(ToOptions().QueueIncidentCreated, msg, msg.EventId, msg.CorrelationId);
         return Task.CompletedTask;
     }
 
     public Task PublishIncidentStatusChangedAsync(IncidentStatusChangedMessage msg, CancellationToken ct)
     {
         if (!UseRabbitMq()) return Task.CompletedTask;
-        Publish(ToOptions().QueueIncidentStatusChanged, msg);
+        Publish(ToOptions().QueueIncidentStatusChanged, msg, msg.EventId, msg.CorrelationId);
         return Task.CompletedTask;
     }
 
-    private void Publish<T>(string queueName, T message)
+    private void Publish<T>(string queueName, T message, string eventId, string correlationId)
     {
         var opt = ToOptions();
 
-        var factory = new ConnectionFactory
+        var factory = new RabbitMQ.Client.ConnectionFactory
         {
             HostName = opt.Host,
             UserName = opt.Username,
@@ -44,11 +44,14 @@ public class RabbitMqMessageBusPublisher : IMessageBusPublisher
 
         channel.QueueDeclare(queue: queueName, durable: true, exclusive: false, autoDelete: false, arguments: null);
 
-        var json = JsonSerializer.Serialize(message);
-        var body = Encoding.UTF8.GetBytes(json);
+        var json = System.Text.Json.JsonSerializer.Serialize(message);
+        var body = System.Text.Encoding.UTF8.GetBytes(json);
 
         var props = channel.CreateBasicProperties();
-        props.DeliveryMode = 2; // persistent
+        props.DeliveryMode = 2;            // persistent
+        props.MessageId = eventId;         // ✅ message identity
+        props.CorrelationId = correlationId; // ✅ correlation across systems
+        props.ContentType = "application/json";
 
         channel.BasicPublish(exchange: "", routingKey: queueName, basicProperties: props, body: body);
     }

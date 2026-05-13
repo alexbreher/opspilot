@@ -1,4 +1,4 @@
-using OpsPilot.Api.Contracts;
+using OpsPilot.Contracts;
 
 namespace OpsPilot.Api.Services;
 

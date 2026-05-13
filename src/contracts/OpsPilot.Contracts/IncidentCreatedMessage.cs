@@ -1,4 +1,6 @@
-namespace OpsPilot.Api.Contracts;
+using System;
+
+namespace OpsPilot.Contracts;
 
 public record IncidentCreatedMessage(
     string EventId,

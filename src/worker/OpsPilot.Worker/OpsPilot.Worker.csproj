@@ -19,4 +19,8 @@
   <ItemGroup>
     <Folder Include="Consumers\" />
   </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\contracts\OpsPilot.Contracts\OpsPilot.Contracts.csproj" />
+  </ItemGroup>
 </Project>
