@@ -1,4 +1,4 @@
-using System.Net.Http.Json;
+﻿using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
@@ -17,7 +17,6 @@ public class RabbitMqConsumerHostedService : BackgroundService
 
     private IConnection? _connection;
     private IModel? _channel;
-    private const int MaxRetries = 5;
 
     public RabbitMqConsumerHostedService(
         ILogger<RabbitMqConsumerHostedService> logger,
@@ -48,24 +47,30 @@ public class RabbitMqConsumerHostedService : BackgroundService
             DispatchConsumersAsync = true
         };
 
-        _connection = factory.CreateConnection();
+        _connection = factory.CreateConnection("opspilot-worker");
         _channel = _connection.CreateModel();
 
         DeclareQueue(opt.QueueIncidentCreated);
         DeclareQueue(opt.QueueIncidentStatusChanged);
 
         _channel.BasicQos(0, 1, false);
-        ConsumeQueue<OpsPilot.Contracts.IncidentCreatedMessage>(api, opt.QueueIncidentCreated, HandleIncidentCreatedAsync, stoppingToken);
-        ConsumeQueue<OpsPilot.Contracts.IncidentStatusChangedMessage>(api, opt.QueueIncidentStatusChanged, HandleIncidentStatusChangedAsync, stoppingToken);
+
+        // 👇 Explicit generic args avoid inference issues
+        ConsumeQueue<IncidentCreatedMessage>(api, opt.QueueIncidentCreated, HandleIncidentCreatedAsync, stoppingToken);
+        ConsumeQueue<IncidentStatusChangedMessage>(api, opt.QueueIncidentStatusChanged, HandleIncidentStatusChangedAsync, stoppingToken);
 
         _logger.LogInformation("RabbitMq consumer running.");
         await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken);
     }
 
+    /// <summary>
+    /// Generic consume loop that extracts MessageId/CorrelationId from ea.BasicProperties
+    /// and passes them into the handler.
+    /// </summary>
     private void ConsumeQueue<T>(
         HttpClient api,
         string queueName,
-        Func<HttpClient, T, CancellationToken, Task> handler,
+        Func<HttpClient, T, string, string?, CancellationToken, Task> handler,
         CancellationToken stoppingToken)
     {
         var consumer = new AsyncEventingBasicConsumer(_channel!);
@@ -74,72 +79,40 @@ public class RabbitMqConsumerHostedService : BackgroundService
         {
             try
             {
+                var messageId = ea.BasicProperties?.MessageId;
+                var corrFromProps = ea.BasicProperties?.CorrelationId;
+
+                _logger.LogInformation(
+                    "Received {Queue} MessageId={MessageId} CorrelationId={CorrelationId}",
+                    queueName,
+                    messageId ?? "(none)",
+                    corrFromProps ?? "(none)");
+
                 var json = Encoding.UTF8.GetString(ea.Body.ToArray());
                 var msg = JsonSerializer.Deserialize<T>(json);
 
                 if (msg == null)
                 {
-                    _logger.LogWarning("Null message deserialized from {Queue}", queueName);
+                    _logger.LogWarning("Null message deserialized from {Queue}. Acking.", queueName);
                     _channel!.BasicAck(ea.DeliveryTag, false);
                     return;
                 }
 
-                await handler(api, msg, stoppingToken);
+                // ✅ The key part: choose correlation id from broker props if available; fallback to payload correlation
+                var correlationId = corrFromProps;
+                if (string.IsNullOrWhiteSpace(correlationId))
+                {
+                    correlationId = TryExtractCorrelationFromPayload(msg) ?? "n/a";
+                }
+
+                await handler(api, msg, correlationId!, messageId, stoppingToken);
 
                 _channel!.BasicAck(ea.DeliveryTag, false);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "RabbitMq processing failed for {Queue}. Requeueing.", queueName);
-                var retryCount = GetRetryCount(ea.BasicProperties);
-                retryCount++;
-
-                if (retryCount <= MaxRetries)
-                {
-                    _logger.LogWarning("Processing failed. Requeueing. Queue={Queue} Retry={Retry}/{Max}",
-                        queueName, retryCount, MaxRetries);
-
-                    // republish with incremented retry header
-                    var props = _channel!.CreateBasicProperties();
-                    props.DeliveryMode = ea.BasicProperties?.DeliveryMode ?? 2;
-                    props.MessageId = ea.BasicProperties?.MessageId;
-                    props.CorrelationId = ea.BasicProperties?.CorrelationId;
-                    props.ContentType = ea.BasicProperties?.ContentType ?? "application/json";
-                    props.Headers = ea.BasicProperties?.Headers != null
-                        ? new Dictionary<string, object>(ea.BasicProperties.Headers)
-                        : new Dictionary<string, object>();
-
-                    SetRetryCount(props, retryCount);
-
-                    _channel.BasicPublish(exchange: "", routingKey: queueName, basicProperties: props, body: ea.Body);
-
-                    // ACK the original (we republished it ourselves)
-                    _channel.BasicAck(ea.DeliveryTag, false);
-                }
-                else
-                {
-                    var dlq = $"{queueName}.dlq";
-                    _logger.LogError("Max retries exceeded. Dead-lettering. Queue={Queue} DLQ={DLQ} MessageId={MessageId}",
-                        queueName, dlq, ea.BasicProperties?.MessageId);
-
-                    _channel!.QueueDeclare(queue: dlq, durable: true, exclusive: false, autoDelete: false, arguments: null);
-
-                    var props = _channel.CreateBasicProperties();
-                    props.DeliveryMode = ea.BasicProperties?.DeliveryMode ?? 2;
-                    props.MessageId = ea.BasicProperties?.MessageId;
-                    props.CorrelationId = ea.BasicProperties?.CorrelationId;
-                    props.ContentType = ea.BasicProperties?.ContentType ?? "application/json";
-                    props.Headers = ea.BasicProperties?.Headers != null
-                        ? new Dictionary<string, object>(ea.BasicProperties.Headers)
-                        : new Dictionary<string, object>();
-
-                    SetRetryCount(props, retryCount);
-
-                    _channel.BasicPublish(exchange: "", routingKey: dlq, basicProperties: props, body: ea.Body);
-
-                    // ACK original (we moved it)
-                    _channel.BasicAck(ea.DeliveryTag, false);
-                }
+                _channel!.BasicNack(ea.DeliveryTag, false, requeue: true);
             }
         };
 
@@ -147,32 +120,65 @@ public class RabbitMqConsumerHostedService : BackgroundService
         _logger.LogInformation("Consuming queue {Queue}", queueName);
     }
 
-    private async Task HandleIncidentCreatedAsync(HttpClient api, IncidentCreatedMessage msg, CancellationToken ct)
+    // Handlers now receive correlationId + messageId explicitly (no need for ea here)
+    private async Task HandleIncidentCreatedAsync(HttpClient api, IncidentCreatedMessage msg, string correlationId, string? messageId, CancellationToken ct)
     {
         if (await IsAlreadyProcessed(api, msg.EventId, ct))
         {
-            _logger.LogInformation("Skip already processed IncidentCreated EventId={EventId}", msg.EventId);
+            _logger.LogInformation("Skip already processed IncidentCreated EventId={EventId} MessageId={MessageId}", msg.EventId, messageId ?? "(none)");
             return;
         }
 
-        await IngestOperational(api, "EventProcessed", $"RabbitMQ consumed IncidentCreated ({msg.IncidentId})", msg.CorrelationId, msg.EventId, msg.IncidentId, msg.ServiceId, ct);
+        await IngestOperational(
+            api,
+            eventType: "EventProcessed",
+            message: $"RabbitMQ consumed IncidentCreated ({msg.IncidentId})",
+            correlationId: correlationId,
+            sourceEventId: msg.EventId,
+            incidentId: msg.IncidentId,
+            serviceId: msg.ServiceId,
+            ct: ct);
+
         await MarkProcessed(api, msg.EventId, "IncidentCreatedMessage", ct);
 
-        _logger.LogInformation("Processed IncidentCreated EventId={EventId}", msg.EventId);
+        _logger.LogInformation("Processed IncidentCreated EventId={EventId} MessageId={MessageId}", msg.EventId, messageId ?? "(none)");
     }
 
-    private async Task HandleIncidentStatusChangedAsync(HttpClient api, IncidentStatusChangedMessage msg, CancellationToken ct)
+    private async Task HandleIncidentStatusChangedAsync(HttpClient api, IncidentStatusChangedMessage msg, string correlationId, string? messageId, CancellationToken ct)
     {
         if (await IsAlreadyProcessed(api, msg.EventId, ct))
         {
-            _logger.LogInformation("Skip already processed StatusChanged EventId={EventId}", msg.EventId);
+            _logger.LogInformation("Skip already processed StatusChanged EventId={EventId} MessageId={MessageId}", msg.EventId, messageId ?? "(none)");
             return;
         }
 
-        await IngestOperational(api, "EventProcessed", $"RabbitMQ consumed IncidentStatusChanged ({msg.IncidentId})", msg.CorrelationId, msg.EventId, msg.IncidentId, null, ct);
+        await IngestOperational(
+            api,
+            eventType: "EventProcessed",
+            message: $"RabbitMQ consumed IncidentStatusChanged ({msg.IncidentId})",
+            correlationId: correlationId,
+            sourceEventId: msg.EventId,
+            incidentId: msg.IncidentId,
+            serviceId: null,
+            ct: ct);
+
         await MarkProcessed(api, msg.EventId, "IncidentStatusChangedMessage", ct);
 
-        _logger.LogInformation("Processed StatusChanged EventId={EventId}", msg.EventId);
+        _logger.LogInformation("Processed StatusChanged EventId={EventId} MessageId={MessageId}", msg.EventId, messageId ?? "(none)");
+    }
+
+    /// <summary>
+    /// If broker correlationId is missing, try to read it from payload.
+    /// Since messages are record types, we use pattern matching.
+    /// </summary>
+    private static string? TryExtractCorrelationFromPayload<T>(T msg)
+    {
+        return msg switch
+        {
+            IncidentCreatedMessage m => m.CorrelationId,
+            IncidentStatusChangedMessage m => m.CorrelationId,
+            _ => null
+        };
     }
 
     private HttpClient CreateApiClient()
@@ -253,30 +259,5 @@ public class RabbitMqConsumerHostedService : BackgroundService
         try { _channel?.Dispose(); } catch { }
         try { _connection?.Dispose(); } catch { }
         base.Dispose();
-    }
-
-    private static int GetRetryCount(IBasicProperties props)
-    {
-        if (props?.Headers == null) return 0;
-        if (props.Headers.TryGetValue("x-retry-count", out var val) && val != null)
-        {
-            try
-            {
-                if (val is byte[] bytes)
-                {
-                    var s = Encoding.UTF8.GetString(bytes);
-                    if (int.TryParse(s, out var n)) return n;
-                }
-                if (val is int i) return i;
-            }
-            catch { }
-        }
-        return 0;
-    }
-
-    private static void SetRetryCount(IBasicProperties props, int retryCount)
-    {
-        props.Headers ??= new Dictionary<string, object>();
-        props.Headers["x-retry-count"] = Encoding.UTF8.GetBytes(retryCount.ToString());
     }
 }

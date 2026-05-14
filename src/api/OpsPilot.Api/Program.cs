@@ -80,6 +80,7 @@ builder.Services.AddSingleton<IEventQueueV2, InMemoryEventQueueV2>();
 builder.Services.AddSingleton<IBackgroundEventQueue, ChannelBackgroundEventQueue>();
 builder.Services.AddHostedService<ApiEventProcessorHostedService>();
 builder.Services.AddSingleton<IMessageBusPublisher, RabbitMqMessageBusPublisher>();
+builder.Services.AddSingleton<IRabbitMqConnectionProvider, RabbitMqConnectionProvider>();
 
 var app = builder.Build();
 
